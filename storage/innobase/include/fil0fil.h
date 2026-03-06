@@ -245,6 +245,13 @@ struct fil_space_t {
   @param[in]    n_reserved      number of reserved extents */
   void release_free_extents(ulint n_reserved);
 
+  /** Check if tablespace size exceeds warning threshold.
+  @param[in]    new_size        New size in pages
+  @param[in]    threshold       Nonzero threshold in bytes
+  @return true if warning was emitted */
+  UNIV_COLD bool check_size_warning(page_no_t new_size,
+                                    uint64_t threshold) noexcept;
+
   /** @return true if the instance is queued for deletion. Guarantees the space
   is not deleted as long as the fil_shard mutex is not released. */
   bool is_deleted() const;
@@ -426,6 +433,15 @@ struct fil_space_t {
 
   /** true if the tablespace is marked for deletion. */
   std::atomic_bool m_deleted{};
+
+  /** Last percentage at which we emitted a size warning (0-100) */
+  uint8_t m_last_size_warning_pct{0};
+
+  /** Warning pct value used for the last warning */
+  uint8_t m_last_warning_pct{0};
+
+  /** Threshold in pages used for the last warning */
+  uint32_t m_last_warning_threshold{0};
 
   /** true if bulk operation is in progress. */
   std::atomic_bool m_is_bulk{false};

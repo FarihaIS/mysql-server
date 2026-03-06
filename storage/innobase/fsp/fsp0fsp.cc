@@ -71,6 +71,7 @@ double fseg_reserve_pct = FSEG_RESERVE_PCT_DFLT;
 #include "dd/types/tablespace.h"
 #include "mysqld.h"
 #include "sql/dd/dictionary.h"
+#include "sql/log.h"
 #include "sql_backup_lock.h"
 #include "sql_thd_internal_api.h"
 #include "thd_raii.h"
@@ -1218,6 +1219,51 @@ page_no_t fsp_header_get_tablespace_size(void) {
   return (size);
 }
 
+/** Check if tablespace size exceeds warning threshold.
+@param[in]      new_size   New size in pages
+@param[in]      threshold  Nonzero threshold in bytes
+@return true if warning was emitted */
+UNIV_COLD bool fil_space_t::check_size_warning(page_no_t new_size,
+                                               uint64_t threshold) noexcept {
+  const uint warning_pct = srv_tablespace_size_warning_pct;
+  const page_size_t page_size(flags);
+  const uint32_t threshold_pages =
+      uint32_t(threshold / page_size.physical());
+
+  /* Reset state if threshold or warning percentage changed */
+  if ((m_last_warning_threshold ^ threshold_pages) |
+      (uint{m_last_warning_pct} ^ warning_pct)) {
+    m_last_size_warning_pct = 0;
+    m_last_warning_threshold = threshold_pages;
+    m_last_warning_pct = uint8_t(warning_pct);
+  }
+
+  uint64_t current_bytes = uint64_t{new_size} * page_size.physical();
+  /* No overflow: new_size is at most 1ULL<<32, physical() at most 1<<17,
+  so current_bytes < 1ULL<<49 and current_bytes * 100 < 1ULL<<56. */
+  uint64_t current_pct = (current_bytes * 100) / threshold;
+  uint8_t display_pct = uint8_t(std::min(current_pct, uint64_t{100}));
+
+  if (display_pct < warning_pct) {
+    return false;
+  }
+
+  if (display_pct <= m_last_size_warning_pct) {
+    return false;
+  }
+
+  /* Warn on every 1% increase */
+  sql_print_warning(
+      "InnoDB: Tablespace '%s' size " UINT64PF " bytes"
+      " reached %u%% of configured threshold"
+      " of " UINT64PF " bytes",
+      name, current_bytes, unsigned{display_pct}, threshold);
+
+  m_last_size_warning_pct = display_pct;
+
+  return true;
+}
+
 /** Try to extend a single-table tablespace so that a page would fit in the
 data file.
 @param[in,out]  space   Tablespace
@@ -1244,6 +1290,11 @@ data file.
   fsp_header_size_update(header, space->size, mtr);
 
   space->size_in_header = space->size;
+
+  /* Check if tablespace size exceeds warning threshold */
+  if (uint64_t threshold = srv_tablespace_size_warning_threshold) {
+    space->check_size_warning(space->size_in_header, threshold);
+  }
 
   return success;
 }
@@ -1381,6 +1432,11 @@ static UNIV_COLD bool fsp_try_extend_data_file(fil_space_t *space,
       ut_calc_align_down(space->size, (1024 * 1024) / page_size.physical());
 
   fsp_header_size_update(header, space->size_in_header, mtr);
+
+  /* Check if tablespace size exceeds warning threshold */
+  if (uint64_t threshold = srv_tablespace_size_warning_threshold) {
+    space->check_size_warning(space->size_in_header, threshold);
+  }
 
   return true;
 }
